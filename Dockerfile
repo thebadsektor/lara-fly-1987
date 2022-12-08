@@ -1,119 +1,99 @@
-FROM alpine:edge
+# syntax = docker/dockerfile:experimental
 
-RUN apk update
+# Default to PHP 8.1, but we attempt to match
+# the PHP version from the user (wherever `flyctl launch` is run)
+# Valid version values are PHP 7.4+
+ARG PHP_VERSION=8.1
+ARG NODE_VERSION=14
+FROM serversideup/php:${PHP_VERSION}-fpm-nginx-v1.5.0 as base
 
-# add useful utilities
-RUN apk add curl \
-    zip \
-    unzip \
-    ssmtp \
-    tzdata
+# PHP_VERSION needs to be repeated here
+# See https://docs.docker.com/engine/reference/builder/#understand-how-arg-and-from-interact
+ARG PHP_VERSION
 
-# php, with assorted extensions we likely need
-RUN apk add php8 \
-    php8-fpm \
-    php8-cli \
-    php8-pecl-mcrypt \
-    php8-soap \
-    php8-openssl \
-    php8-gmp \
-    php8-pdo_odbc \
-    php8-json \
-    php8-dom \
-    php8-pdo \
-    php8-zip \
-    php8-pdo_mysql \
-    php8-sqlite3 \
-    php8-pdo_pgsql \
-    php8-bcmath \
-    php8-gd \
-    php8-odbc \
-    php8-pdo_sqlite \
-    php8-gettext \
-    php8-xmlreader \
-    php8-bz2 \
-    php8-iconv \
-    php8-pdo_dblib \
-    php8-curl \
-    php8-ctype \
-    php8-phar \
-    php8-xml \
-    php8-common \
-    php8-mbstring \
-    php8-tokenizer \
-    php8-xmlwriter \
-    php8-fileinfo \
-    php8-opcache \
-    php8-simplexml \
-    php8-pecl-redis
+LABEL fly_launch_runtime="laravel"
 
-# node, for Laravel mix
-RUN apk add nodejs npm
+RUN apt-get update && apt-get install -y \
+    git curl zip unzip rsync ca-certificates vim htop cron \
+    php${PHP_VERSION}-pgsql php${PHP_VERSION}-bcmath \
+    php${PHP_VERSION}-swoole php${PHP_VERSION}-xml php${PHP_VERSION}-mbstring \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# supervisor, to support running multiple processes in a single app
-RUN apk add supervisor
-
-# nginx (https://wiki.alpinelinux.org/wiki/Nginx)
-RUN apk add nginx
-# ... with custom conf
-RUN cp /etc/nginx/nginx.conf /etc/nginx/nginx.old.conf && rm -rf /etc/nginx/http.d/default.conf
-
-# htop, which is useful if need to SSH in to the vm
-RUN apk add htop
-
-# composer, to install Laravel's dependencies
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-
-# add users (see https://www.getpagespeed.com/server-setup/nginx-and-php-fpm-what-my-permissions-should-be)
-# 1. a user for the app and php-fpm to interact with it (execute)
-RUN adduser -D -u 1000 -g 'app' app
-# 2. a user for nginx is not needed because already have one
-# ... and add the nginx user TO the app group else it won't have permission to access web files (as can see in /var/log/nginx/error.log)
-RUN addgroup nginx app
-
-# use a socket not port for php-fpm so php-fpm needs permission to write to thay folder (make sure the same .sock is in nginx.conf and in php-fpm's app.conf)
-RUN mkdir /var/run/php && chown -R app:app /var/run/php
-
-# working directory
-RUN mkdir /var/www/html
 WORKDIR /var/www/html
-
-# copy app code across, skipping files based on .dockerignore
+# copy application code, skipping files based on .dockerignore
 COPY . /var/www/html
-# ... install Laravel dependencies
-RUN composer update && composer install --optimize-autoloader --no-dev
-# ... and make all files owned by app, including the just added /vendor
-RUN chown -R app:app /var/www/html
 
-# move the docker-related conf files out of the app folder to where on the vm they need to be
-RUN rm -rf /etc/php8/php-fpm.conf
-RUN rm -rf /etc/php8/php-fpm.d/www.conf
-RUN mv docker/supervisor.conf /etc/supervisord.conf
-RUN mv docker/nginx.conf /etc/nginx/nginx.conf
-RUN mv docker/php.ini /etc/php8/conf.d/php.ini
-RUN mv docker/php-fpm.conf /etc/php8/php-fpm.conf
-RUN mv docker/app.conf /etc/php8/php-fpm.d/app.conf
+RUN composer install --optimize-autoloader --no-dev \
+    && mkdir -p storage/logs \
+    && php artisan optimize:clear \
+    && chown -R webuser:webgroup /var/www/html \
+    && sed -i 's/protected \$proxies/protected \$proxies = "*"/g' app/Http/Middleware/TrustProxies.php \
+    && echo "MAILTO=\"\"\n* * * * * webuser /usr/bin/php /var/www/html/artisan schedule:run" > /etc/cron.d/laravel \
+    && rm -rf /etc/cont-init.d/* \
+    && cp .fly/nginx-websockets.conf /etc/nginx/conf.d/websockets.conf \
+    && cp .fly/entrypoint.sh /entrypoint \
+    && chmod +x /entrypoint
 
-# Laravel's demo app does not need mix however real apps likely will (optimize js/css) so install and then run that:
-RUN npm install
-RUN npx mix --production
-# ... now don't need /node_modules so might as well delete that
-RUN rm -rf node_modules
-# ... and don't need node and npm so might as well delete them
-RUN apk del nodejs npm
+# If we're using Octane...
+RUN if grep -Fq "laravel/octane" /var/www/html/composer.json; then \
+        rm -rf /etc/services.d/php-fpm; \
+        if grep -Fq "spiral/roadrunner" /var/www/html/composer.json; then \
+            mv .fly/octane-rr /etc/services.d/octane; \
+            if [ -f ./vendor/bin/rr ]; then ./vendor/bin/rr get-binary; fi; \
+            rm -f .rr.yaml; \
+        else \
+            mv .fly/octane-swoole /etc/services.d/octane; \
+        fi; \
+        cp .fly/nginx-default-swoole /etc/nginx/sites-available/default; \
+    else \
+        cp .fly/nginx-default /etc/nginx/sites-available/default; \
+    fi
 
-# if need to upload to /storage (but shouldn't as its ephemeral unless mounted to a volume?)
-#RUN chmod -R ug+w /var/www/html/storage
+# Multi-stage build: Build static assets
+# This allows us to not include Node within the final container
+FROM node:${NODE_VERSION} as node_modules_go_brrr
 
-# clear Laravel cache that may be left over
-RUN composer dump-autoload
-RUN php artisan optimize:clear
+RUN mkdir /app
 
-# make sure can execute php files (since php-fpm runs as app, it needs permission e.g for /storage/framework/views for caching views)
-RUN chmod -R 755 /var/www/html
+RUN mkdir -p  /app
+WORKDIR /app
+COPY . .
+COPY --from=base /var/www/html/vendor /app/vendor
 
-# the same port nginx.conf is set to listen on and fly.toml references (standard is 8080)
+# Use yarn or npm depending on what type of
+# lock file we might find. Defaults to
+# NPM if no lock file is found.
+# Note: We run "production" for Mix and "build" for Vite
+RUN if [ -f "vite.config.js" ]; then \
+        ASSET_CMD="build"; \
+    else \
+        ASSET_CMD="production"; \
+    fi; \
+    if [ -f "yarn.lock" ]; then \
+        yarn install --frozen-lockfile; \
+        yarn $ASSET_CMD; \
+    elif [ -f "package-lock.json" ]; then \
+        npm ci --no-audit; \
+        npm run $ASSET_CMD; \
+    else \
+        npm install; \
+        npm run $ASSET_CMD; \
+    fi;
+
+# From our base container created above, we
+# create our final image, adding in static
+# assets that we generated above
+FROM base
+
+# Packages like Laravel Nova may have added assets to the public directory
+# or maybe some custom assets were added manually! Either way, we merge
+# in the assets we generated above rather than overwrite them
+COPY --from=node_modules_go_brrr /app/public /var/www/html/public-npm
+RUN rsync -ar /var/www/html/public-npm/ /var/www/html/public/ \
+    && rm -rf /var/www/html/public-npm \
+    && chown -R webuser:webgroup /var/www/html/public
+
 EXPOSE 8080
 
-# off we go (since no docker-compose, keep both nginx and php-fpm running in the same container by using supervisor) ...
-ENTRYPOINT ["supervisord", "-c", "/etc/supervisord.conf"]
+ENTRYPOINT ["/entrypoint"]

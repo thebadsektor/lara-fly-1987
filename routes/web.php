@@ -16,3 +16,13 @@ use Illuminate\Support\Facades\Route;
 Route::get('/', function () {
     return view('welcome');
 });
+
+Auth::routes();
+
+Route::get('/home', [App\Http\Controllers\HomeController::class, 'index'])->name('home');
+
+Route::get('/test', function () {
+    Cache::put('new-key', Str::random(16));
+
+    return "The new cached string is " . Cache::get('new-key');
+});

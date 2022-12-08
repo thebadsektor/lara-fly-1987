@@ -1,38 +1,66 @@
-app = "fly-hello-laravel"
+# fly.toml file generated for solitary-lake-5053 on 2022-12-08T21:02:59+08:00
+
+app = "solitary-lake-5053"
+kill_signal = "SIGINT"
+kill_timeout = 5
+processes = []
+
+[build]
+  [build.args]
+    NODE_VERSION = "14"
+    PHP_VERSION = "8.1"
 
 [env]
-APP_ENV = "production"
-APP_URL = "https://fly-hello-laravel.fly.dev"
-LOG_CHANNEL = "stderr"
-LOG_LEVEL = "info"
+  APP_ENV = "production"
+  CACHE_DRIVER = "redis"
+  SESSION_DRIVER = "redis"
+  REDIS_HOST = "morning-bush-4756.internal"
+
+  DB_CONNECTION = 'mysql'
+  DB_HOST = 'us-east.connect.psdb.cloud'
+  DB_PORT = '3306'
+  DB_DATABASE = 'laravel'
+  DB_USERNAME = 'wkrbfry996ydx76q8p23'
+  DB_PASSWORD = 'pscale_pw_uDKi6bTN14Wta88HPi4MWF6a0Kc89llfODBlhdu4yBu'
+  MYSQL_ATTR_SSL_CA = '/etc/ssl/certs/ca-certificates.crt'
+
+  LOG_CHANNEL = "stderr"
+  LOG_LEVEL = "info"
+  LOG_STDERR_FORMATTER = "Monolog\\Formatter\\JsonFormatter"
+
+[deploy]
+  release_command = "php /var/www/html/artisan migrate --force"
+
+[[mounts]]
+    destination = "/data"
+    source = "redis_server"
+
+[experimental]
+  allowed_public_ports = []
+  auto_rollback = true
 
 [[services]]
-internal_port = 8080
-protocol = "tcp"
+  http_checks = []
+  internal_port = 8080
+  processes = ["app"]
+  protocol = "tcp"
+  script_checks = []
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+    type = "connections"
 
-[services.concurrency]
-hard_limit = 50
-soft_limit = 25
+  [[services.ports]]
+    force_https = true
+    handlers = ["http"]
+    port = 80
 
-[[services.http_checks]]
-grace_period = "2s"
-interval = 5000
-method = "get"
-path = "/"
-protocol = "http"
-restart_limit = 5
-timeout = 2000
-tls_skip_verify = true
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
 
-[[services.ports]]
-handlers = ["tls", "http"]
-port = 443
-
-[[services.ports]]
-handlers = ["http"]
-port = 80
-
-[[services.tcp_checks]]
-grace_period = "2s"
-interval = 5000
-timeout = 2000
+  [[services.tcp_checks]]
+    grace_period = "1s"
+    interval = "15s"
+    restart_limit = 0
+    timeout = "2s"
